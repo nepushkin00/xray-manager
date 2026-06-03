@@ -10,7 +10,7 @@ const { domainToASCII } = require("url");
 const { execFile, execFileSync, spawn } = require("child_process");
 const net = require("net");
 
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.0.1";
 const PUBLIC_IP = process.env.PUBLIC_IP || "85.155.96.187";
 const PUBLIC_DIR = process.env.PUBLIC_DIR || path.join(__dirname, "public");
 const STATE_PATH = process.env.STATE_PATH || "/var/lib/xray-manager/state.json";
@@ -38,6 +38,17 @@ let managedXrayProcess = null;
 let managedXrayStopping = false;
 let bulkLatencyTestRunning = false;
 let autoSwitchTaskRunning = false;
+
+const AUTO_SWITCH_STATUS_KEYS = [
+  "failoverConsecutiveFailures",
+  "lastRunAt",
+  "lastRunStatus",
+  "lastRunError",
+  "lastFailoverAt",
+  "lastFailoverStatus",
+  "lastFailoverError",
+  "lastSelectedProfileId"
+];
 
 const JSON_TYPE = { "content-type": "application/json; charset=utf-8" };
 const TEXT_TYPE = { "content-type": "text/plain; charset=utf-8" };
@@ -603,7 +614,7 @@ async function activateFastestProfile(state, apply = true) {
   const profile = fastestProfile(state);
   if (!profile) return null;
   setActiveProfile(state, profile);
-  await saveState(state);
+  await saveOperationalState(state);
   if (apply) await writeAndApplyXrayConfig(state, true);
   return profile;
 }
@@ -612,6 +623,24 @@ async function saveState(state) {
   state.updatedAt = nowIso();
   normalizeActiveProfile(state);
   await writeJsonAtomic(STATE_PATH, state, 0o600);
+}
+
+function preserveLatestUserSettings(state, latestState) {
+  const currentAutoSwitch = state.settings?.autoSwitch || {};
+  state.settings = mergeState(defaultState(), { settings: latestState.settings || {} }).settings;
+  for (const key of AUTO_SWITCH_STATUS_KEYS) {
+    if (currentAutoSwitch[key] !== undefined) {
+      state.settings.autoSwitch[key] = currentAutoSwitch[key];
+    }
+  }
+  return state;
+}
+
+async function saveOperationalState(state) {
+  const latestState = await loadState();
+  preserveLatestUserSettings(state, latestState);
+  await saveState(state);
+  return state;
 }
 
 function buildStreamSettings(profile) {
@@ -1264,7 +1293,7 @@ async function testProfilesConcurrently(state, profiles, concurrency = DEFAULT_L
       error: result.error
     };
   });
-  await saveState(state);
+  await saveOperationalState(state);
   return results;
 }
 
@@ -1322,7 +1351,7 @@ async function refreshSubscription(state, subscriptionId) {
   sub.lastUpdateAt = nowIso();
   sub.lastUpdateStatus = `ok: ${merged.added} added, ${merged.updated} updated`;
   sub.lastUpdateError = null;
-  await saveState(state);
+  await saveOperationalState(state);
   return { ...merged, totalLinks: links.length };
 }
 
@@ -1338,7 +1367,7 @@ async function refreshAllSubscriptions(state) {
         current.lastUpdateAt = nowIso();
         current.lastUpdateStatus = "error";
         current.lastUpdateError = error.message;
-        await saveState(state);
+        await saveOperationalState(state);
       }
       results.push({ id: sub.id, ok: false, error: error.message });
     }
@@ -1365,7 +1394,7 @@ async function runAutoSwitchCycle(reason = "manual", options = {}) {
     state.settings.autoSwitch.lastRunAt = nowIso();
     state.settings.autoSwitch.lastRunStatus = "skipped: latency check running";
     state.settings.autoSwitch.lastRunError = null;
-    await saveState(state);
+    await saveOperationalState(state);
     return { ok: false, skipped: true, reason: "latency-running" };
   }
 
@@ -1380,7 +1409,7 @@ async function runAutoSwitchCycle(reason = "manual", options = {}) {
     state.settings.autoSwitch.lastRunAt = nowIso();
     state.settings.autoSwitch.lastRunStatus = "running";
     state.settings.autoSwitch.lastRunError = null;
-    await saveState(state);
+    await saveOperationalState(state);
 
     let subscriptionResults = [];
     if (refreshSubscriptions) {
@@ -1405,7 +1434,7 @@ async function runAutoSwitchCycle(reason = "manual", options = {}) {
       : "ok: no candidate";
     state.settings.autoSwitch.lastRunError = failedSubs ? `subscription errors: ${failedSubs}` : null;
     state.settings.autoSwitch.lastSelectedProfileId = selected?.id || null;
-    await saveState(state);
+    await saveOperationalState(state);
 
     return {
       ok: true,
@@ -1422,7 +1451,7 @@ async function runAutoSwitchCycle(reason = "manual", options = {}) {
     state.settings.autoSwitch.lastRunAt = nowIso();
     state.settings.autoSwitch.lastRunStatus = "error";
     state.settings.autoSwitch.lastRunError = error.message;
-    await saveState(state).catch(() => {});
+    await saveOperationalState(state).catch(() => {});
     throw error;
   } finally {
     autoSwitchTaskRunning = false;
@@ -1448,7 +1477,7 @@ async function runFailoverCheck() {
       state.settings.autoSwitch.lastFailoverAt = nowIso();
       state.settings.autoSwitch.lastFailoverStatus = `active ok: ${active.name || active.address} (${result.delayMs} ms)`;
       state.settings.autoSwitch.lastFailoverError = null;
-      await saveState(state);
+      await saveOperationalState(state);
       return { ok: true, failed: false, activeProfile: active };
     }
 
@@ -1457,7 +1486,7 @@ async function runFailoverCheck() {
     state.settings.autoSwitch.lastFailoverAt = nowIso();
     state.settings.autoSwitch.lastFailoverStatus = `active failed: ${failures}/${settings.failoverFailures || 2}`;
     state.settings.autoSwitch.lastFailoverError = result.error;
-    await saveState(state);
+    await saveOperationalState(state);
 
     if (failures < clampNumber(settings.failoverFailures || 2, 1, 10)) {
       return { ok: false, failed: true, switched: false, activeProfile: active };
@@ -1477,7 +1506,7 @@ async function runFailoverCheck() {
     ? `switched: ${switchResult.selectedProfile.name || switchResult.selectedProfile.address}`
     : "switch failed: no candidate";
   state.settings.autoSwitch.lastFailoverError = switchResult.selectedProfile ? null : "No eligible working profile.";
-  await saveState(state);
+  await saveOperationalState(state);
   return { ...switchResult, failed: true, switched: Boolean(switchResult.selectedProfile) };
 }
 
@@ -1788,7 +1817,7 @@ function makeApp(secrets) {
       }
       const result = await runDelayTest(state, profile);
       applyLatencyResult(profile, result);
-      await saveState(state);
+      await saveOperationalState(state);
       sendJson(res, result.error ? 502 : 200, { ok: !result.error, ...result, profile });
       return;
     }

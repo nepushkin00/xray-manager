@@ -10,6 +10,7 @@ services:
     environment:
       PUBLIC_IP: "${PUBLIC_IP:-127.0.0.1}"
       MANAGER_MODE: "docker"
+      LATENCY_TEST_CONCURRENCY: "${LATENCY_TEST_CONCURRENCY:-6}"
     volumes:
       - xray-manager-etc:/etc/xray-manager
       - xray-config:/etc/xray-codex

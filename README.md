@@ -71,6 +71,7 @@ docker compose up -d
 | `XRAY_BIN` | `/opt/xray-codex/xray` | Путь к Xray binary |
 | `XRAY_CONFIG` | `/etc/xray-codex/config.json` | Генерируемый Xray config |
 | `STATE_PATH` | `/var/lib/xray-manager/state.json` | State UI |
+| `LATENCY_TEST_CONCURRENCY` | `6` | Сколько профилей проверять параллельно в "Проверить все" |
 
 ## Данные и бэкапы
 

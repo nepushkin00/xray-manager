@@ -440,31 +440,17 @@ async function main() {
     const profiles = [...state.profiles];
     state.bulkTesting = true;
     state.testingIds = new Set(profiles.map((profile) => profile.id));
-    state.bulkProgress = `Проверка: 0/${profiles.length}`;
+    state.bulkProgress = `Проверка: 0/${profiles.length} · параллельно`;
     renderProfiles();
-    let success = 0;
-    let failed = 0;
     try {
-      for (let index = 0; index < profiles.length; index += 1) {
-        const profile = profiles[index];
-        state.bulkProgress = `Проверка: ${index + 1}/${profiles.length} · ${profile.name || profile.address}`;
-        state.testingIds.add(profile.id);
-        renderProfiles();
-        try {
-          const result = await api(`/api/test/${profile.id}`, { method: "POST" });
-          updateProfile(result.profile);
-          success += 1;
-        } catch (error) {
-          if (error.data?.profile) updateProfile(error.data.profile);
-          else updateProfile({ ...profile, delayMs: null, lastTestError: error.message, lastTestAt: new Date().toISOString() });
-          failed += 1;
-        } finally {
-          state.testingIds.delete(profile.id);
-          renderProfiles();
-        }
-      }
+      const result = await api("/api/test-all", { method: "POST", body: { ids: profiles.map((profile) => profile.id) } });
+      state.profiles = Array.isArray(result.profiles) ? result.profiles : state.profiles;
       state.bulkProgress = "";
-      toast(`Проверка завершена: ${success} ok, ${failed} ошибок`);
+      toast(`Проверка завершена: ${result.success} ok, ${result.failed} ошибок · потоков: ${result.concurrency}`);
+    } catch (error) {
+      if (error.status === 409) toast("Проверка задержек уже запущена");
+      else toast(error.message);
+      await loadAll().catch(() => {});
     } finally {
       state.bulkTesting = false;
       state.testingIds.clear();

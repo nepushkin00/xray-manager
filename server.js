@@ -33,8 +33,10 @@ const NODE_BIN = process.execPath;
 const HTTP_PORT = Number(process.env.HTTP_PORT || 80);
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
 const LISTEN_HOST = process.env.LISTEN_HOST || "0.0.0.0";
+const DEFAULT_LATENCY_TEST_CONCURRENCY = clampNumber(process.env.LATENCY_TEST_CONCURRENCY || 6, 1, 12);
 let managedXrayProcess = null;
 let managedXrayStopping = false;
+let bulkLatencyTestRunning = false;
 
 const JSON_TYPE = { "content-type": "application/json; charset=utf-8" };
 const TEXT_TYPE = { "content-type": "text/plain; charset=utf-8" };
@@ -103,6 +105,12 @@ function toIntPort(value, fallback = 443) {
     return fallback;
   }
   return port;
+}
+
+function clampNumber(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.max(min, Math.min(max, Math.round(number)));
 }
 
 function normalizeNetwork(network) {
@@ -1183,21 +1191,39 @@ async function runDelayTest(state, profile) {
   }
 }
 
-async function testProfilesSequentially(state, profiles) {
-  const results = [];
-  for (const profile of profiles) {
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workerCount = Math.min(items.length, concurrency);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }));
+  return results;
+}
+
+function applyLatencyResult(profile, result) {
+  profile.delayMs = result.delayMs;
+  profile.lastTestAt = nowIso();
+  profile.lastTestError = result.error;
+}
+
+async function testProfilesConcurrently(state, profiles, concurrency = DEFAULT_LATENCY_TEST_CONCURRENCY) {
+  const width = clampNumber(concurrency, 1, 12);
+  const results = await mapWithConcurrency(profiles, width, async (profile) => {
     const result = await runDelayTest(state, profile);
-    profile.delayMs = result.delayMs;
-    profile.lastTestAt = nowIso();
-    profile.lastTestError = result.error;
-    results.push({
+    applyLatencyResult(profile, result);
+    return {
       id: profile.id,
       name: profile.name,
       delayMs: result.delayMs,
       error: result.error
-    });
-    await saveState(state);
-  }
+    };
+  });
+  await saveState(state);
   return results;
 }
 
@@ -1467,6 +1493,10 @@ function makeApp(secrets) {
     }
 
     if (pathname === "/api/test-all" && req.method === "POST") {
+      if (bulkLatencyTestRunning) {
+        sendJson(res, 409, { error: "Latency check is already running." });
+        return;
+      }
       const body = await readRequestBody(req);
       const ids = Array.isArray(body.ids) ? new Set(body.ids.map(String)) : null;
       const profiles = ids ? state.profiles.filter((profile) => ids.has(profile.id)) : state.profiles;
@@ -1474,13 +1504,19 @@ function makeApp(secrets) {
         sendJson(res, 400, { error: "No profiles to test." });
         return;
       }
-      const results = await testProfilesSequentially(state, profiles);
+      const concurrency = clampNumber(body.concurrency || DEFAULT_LATENCY_TEST_CONCURRENCY, 1, 12);
+      bulkLatencyTestRunning = true;
+      const results = await testProfilesConcurrently(state, profiles, concurrency).finally(() => {
+        bulkLatencyTestRunning = false;
+      });
       sendJson(res, 200, {
         ok: true,
         total: results.length,
         success: results.filter((item) => !item.error).length,
         failed: results.filter((item) => item.error).length,
-        results
+        concurrency,
+        results,
+        profiles: state.profiles
       });
       return;
     }
@@ -1492,9 +1528,7 @@ function makeApp(secrets) {
         return;
       }
       const result = await runDelayTest(state, profile);
-      profile.delayMs = result.delayMs;
-      profile.lastTestAt = nowIso();
-      profile.lastTestError = result.error;
+      applyLatencyResult(profile, result);
       await saveState(state);
       sendJson(res, result.error ? 502 : 200, { ok: !result.error, ...result, profile });
       return;

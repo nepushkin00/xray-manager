@@ -1,0 +1,25 @@
+services:
+  xray-manager:
+    build: .
+    container_name: xray-manager
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+      - "8443:443"
+      - "10808:10808"
+    environment:
+      PUBLIC_IP: "${PUBLIC_IP:-127.0.0.1}"
+      MANAGER_MODE: "docker"
+    volumes:
+      - xray-manager-etc:/etc/xray-manager
+      - xray-config:/etc/xray-codex
+      - xray-state:/var/lib/xray-manager
+      - xray-logs:/var/log/xray-codex
+      - xray-backups:/var/backups/xray-codex
+
+volumes:
+  xray-manager-etc:
+  xray-config:
+  xray-state:
+  xray-logs:
+  xray-backups:

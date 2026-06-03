@@ -1,0 +1,14 @@
+{
+  "name": "xray-manager",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node tests/parser.test.js",
+    "init": "node server.js --init",
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

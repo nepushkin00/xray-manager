@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Xray Manager</title>
+    <link rel="stylesheet" href="/styles.css?v=7">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">X</span>
+          <div>
+            <strong>Xray Manager</strong>
+            <small id="statusLine">Подключение...</small>
+          </div>
+        </div>
+        <nav class="tabs" aria-label="Разделы">
+          <button class="tab is-active" data-view="servers">Серверы</button>
+          <button class="tab" data-view="subscriptions">Подписки</button>
+          <button class="tab" data-view="settings">Настройки</button>
+          <button class="tab" data-view="logs">Логи</button>
+        </nav>
+        <button id="logoutBtn" class="icon-btn" title="Выйти">⎋</button>
+      </header>
+
+      <section id="serversView" class="view is-active">
+        <div class="toolbar">
+          <button id="importBtn" class="primary">+ VLESS</button>
+          <button id="refreshBtn">Обновить</button>
+          <button id="selectAllBtn">Выделить все</button>
+          <button id="clearSelectionBtn">Снять</button>
+          <button id="deleteSelectedBtn" class="danger">Удалить выбранные</button>
+          <button id="testAllBtn">Проверить все</button>
+          <input id="filterInput" class="filter" placeholder="Фильтр серверов" autocomplete="off">
+          <span id="activeHint" class="hint"></span>
+          <span id="selectionHint" class="hint"></span>
+          <span id="bulkHint" class="hint"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="col-check"><input id="toggleVisibleCheckbox" type="checkbox" title="Выделить видимые"></th>
+                <th class="col-num">#</th>
+                <th>Тип</th>
+                <th>Имя</th>
+                <th>Адрес</th>
+                <th>Порт</th>
+                <th>Network</th>
+                <th>TLS</th>
+                <th>Группа</th>
+                <th>Задержка</th>
+                <th class="actions">Действия</th>
+              </tr>
+            </thead>
+            <tbody id="profilesBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="subscriptionsView" class="view">
+        <div class="panel">
+          <h2>Группы подписок</h2>
+          <form id="subscriptionForm" class="grid-form">
+            <label>Название<input name="name" placeholder="import_sub"></label>
+            <label>Группа<input name="group" placeholder="import_sub"></label>
+            <label class="wide">URL<input name="url" placeholder="https://example.com/sub"></label>
+            <button class="primary">Добавить</button>
+          </form>
+        </div>
+        <div class="list" id="subscriptionsList"></div>
+      </section>
+
+      <section id="settingsView" class="view">
+        <form id="settingsForm" class="settings-grid">
+          <div class="panel">
+            <h2>Mixed proxy</h2>
+            <label>Listen<input name="listen"></label>
+            <label>Port<input name="port" type="number" min="1" max="65535"></label>
+            <label class="check"><input name="udp" type="checkbox"> UDP</label>
+            <label class="check"><input name="sniffing" type="checkbox"> Sniffing</label>
+            <label class="check"><input name="auth" type="checkbox"> Пароль на proxy</label>
+            <label>User<input name="user"></label>
+            <label>Password<input name="pass" type="password" placeholder="оставить текущий"></label>
+          </div>
+          <div class="panel">
+            <h2>Core</h2>
+            <label>Routing
+              <select name="routingMode">
+                <option value="global">Global</option>
+                <option value="bypass-ru">Bypass RU</option>
+                <option value="bypass-private">Bypass private</option>
+                <option value="direct">Direct</option>
+                <option value="block">Block</option>
+              </select>
+            </label>
+            <label>Domain strategy
+              <select name="domainStrategy">
+                <option value="AsIs">AsIs</option>
+                <option value="IPIfNonMatch">IPIfNonMatch</option>
+                <option value="IPOnDemand">IPOnDemand</option>
+              </select>
+            </label>
+            <label>Log level
+              <select name="loglevel">
+                <option value="debug">debug</option>
+                <option value="info">info</option>
+                <option value="warning">warning</option>
+                <option value="error">error</option>
+                <option value="none">none</option>
+              </select>
+            </label>
+            <label class="check"><input name="muxEnabled" type="checkbox"> Mux</label>
+            <label>Mux concurrency<input name="muxConcurrency" type="number"></label>
+          </div>
+          <div class="panel wide">
+            <h2>Direct domains</h2>
+            <div class="inline-add">
+              <input id="directDomainInput" placeholder="*.ru, *.рф, *.vk.com, geosite:category-ru">
+              <button id="addDirectDomainBtn" type="button" class="primary">+</button>
+            </div>
+            <div class="mini-table-wrap">
+              <table class="mini-table">
+                <thead>
+                  <tr>
+                    <th>Правило</th>
+                    <th class="mini-actions">Удалить</th>
+                  </tr>
+                </thead>
+                <tbody id="directDomainsBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <button class="primary wide">Сохранить и применить</button>
+        </form>
+      </section>
+
+      <section id="logsView" class="view">
+        <div class="toolbar">
+          <button id="reloadLogsBtn">Обновить логи</button>
+        </div>
+        <div class="logs">
+          <section>
+            <h2>error.log</h2>
+            <pre id="errorLog"></pre>
+          </section>
+          <section>
+            <h2>access.log</h2>
+            <pre id="accessLog"></pre>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="loginDialog" class="modal">
+      <form id="loginForm" method="dialog" class="login-card">
+        <h1>Xray Manager</h1>
+        <label>Логин<input name="username" autocomplete="username" required></label>
+        <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
+        <label class="check"><input name="remember" type="checkbox" checked> Запомнить вход</label>
+        <button class="primary">Войти</button>
+        <p id="loginError" class="error"></p>
+      </form>
+    </dialog>
+
+    <dialog id="importDialog" class="modal">
+      <form id="importForm" method="dialog" class="editor-card">
+        <h2>Импорт VLESS</h2>
+        <label>Группа<input name="group" value="MAIN"></label>
+        <label>Ссылки<textarea name="text" rows="9" placeholder="vless://..."></textarea></label>
+        <div class="modal-actions">
+          <button type="button" data-close>Отмена</button>
+          <button class="primary">Импортировать</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="editDialog" class="modal">
+      <form id="editForm" method="dialog" class="editor-card">
+        <h2>Профиль</h2>
+        <input name="id" type="hidden">
+        <div class="two-col">
+          <label>Имя<input name="name"></label>
+          <label>Группа<input name="group"></label>
+          <label>Адрес<input name="address"></label>
+          <label>Порт<input name="port" type="number" min="1" max="65535"></label>
+          <label>UUID<input name="uuid"></label>
+          <label>Flow<input name="flow"></label>
+          <label>Network<input name="network"></label>
+          <label>Security<input name="security"></label>
+          <label>SNI<input name="serverName"></label>
+          <label>Fingerprint<input name="fingerprint"></label>
+          <label>Public key<input name="publicKey"></label>
+          <label>Short ID<input name="shortId"></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" data-close>Отмена</button>
+          <button class="primary">Сохранить</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" hidden></div>
+    <script src="/app.js?v=7"></script>
+  </body>
+</html>

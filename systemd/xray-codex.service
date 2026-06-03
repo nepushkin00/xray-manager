@@ -1,0 +1,23 @@
+[Unit]
+Description=System Xray core managed by Xray Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xray-codex
+Group=xray-codex
+WorkingDirectory=/opt/xray-codex
+Environment=XRAY_LOCATION_ASSET=/opt/xray-codex
+ExecStart=/opt/xray-codex/xray run -c /etc/xray-codex/config.json
+Restart=always
+RestartSec=5
+RuntimeDirectory=xray-codex
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/log/xray-codex /run/xray-codex
+
+[Install]
+WantedBy=multi-user.target

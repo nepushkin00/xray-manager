@@ -1,0 +1,19 @@
+[Unit]
+Description=Web UI for managing Xray core
+After=network-online.target xray-codex.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/xray-manager
+Environment=NODE_ENV=production
+EnvironmentFile=-/etc/xray-manager/manager.env
+ExecStart=/usr/bin/env node /opt/xray-manager/server.js
+Restart=always
+RestartSec=5
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

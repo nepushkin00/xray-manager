@@ -219,7 +219,7 @@ tr.is-active {
 }
 
 .actions {
-  width: 250px;
+  width: 290px;
 }
 
 td.actions {
@@ -237,6 +237,17 @@ td.actions {
   font-size: 12px;
   font-weight: 700;
   text-align: center;
+}
+
+.auto-badge {
+  display: inline-block;
+  min-width: 30px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.auto-badge.is-off {
+  color: var(--muted);
 }
 
 .delay-ok {

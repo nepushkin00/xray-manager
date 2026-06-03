@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Xray Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=8">
+    <link rel="stylesheet" href="/styles.css?v=9">
   </head>
   <body>
     <main class="shell">
@@ -33,6 +33,9 @@
           <button id="clearSelectionBtn">Снять</button>
           <button id="deleteSelectedBtn" class="danger">Удалить выбранные</button>
           <button id="testAllBtn">Проверить все</button>
+          <button id="activateBestBtn">Лучший</button>
+          <button id="excludeAutoSelectedBtn">Искл. авто</button>
+          <button id="includeAutoSelectedBtn">В авто</button>
           <input id="filterInput" class="filter" placeholder="Фильтр серверов" autocomplete="off">
           <span id="activeHint" class="hint"></span>
           <span id="selectionHint" class="hint"></span>
@@ -52,6 +55,7 @@
                 <th>TLS</th>
                 <th>Группа</th>
                 <th>Задержка</th>
+                <th>Авто</th>
                 <th class="actions">Действия</th>
               </tr>
             </thead>
@@ -114,6 +118,19 @@
             </label>
             <label class="check"><input name="muxEnabled" type="checkbox"> Mux</label>
             <label>Mux concurrency<input name="muxConcurrency" type="number"></label>
+          </div>
+          <div class="panel">
+            <h2>Автовыбор</h2>
+            <label class="check"><input name="autoSwitchEnabled" type="checkbox"> Включён</label>
+            <label>Интервал, мин<input name="autoSwitchIntervalMinutes" type="number" min="0" max="1440"></label>
+            <label class="check"><input name="autoSwitchRefreshSubscriptions" type="checkbox"> Обновлять подписки</label>
+            <label class="check"><input name="autoSwitchTestProfiles" type="checkbox"> Проверять задержки</label>
+            <label class="check"><input name="autoSwitchFailoverEnabled" type="checkbox"> Failover активного</label>
+            <label>Failover интервал, сек<input name="autoSwitchFailoverIntervalSeconds" type="number" min="10" max="3600"></label>
+            <label>Ошибок до смены<input name="autoSwitchFailoverFailures" type="number" min="1" max="10"></label>
+            <label>Макс. задержка, ms<input name="autoSwitchMaxDelayMs" type="number" min="0" placeholder="0"></label>
+            <button id="runAutoSwitchBtn" type="button">Запустить сейчас</button>
+            <small id="autoSwitchStatus" class="hint"></small>
           </div>
           <div class="panel wide">
             <h2>Direct domains</h2>
@@ -194,6 +211,7 @@
           <label>Fingerprint<input name="fingerprint"></label>
           <label>Public key<input name="publicKey"></label>
           <label>Short ID<input name="shortId"></label>
+          <label class="check"><input name="autoSwitchExcluded" type="checkbox"> Исключить из автовыбора</label>
         </div>
         <div class="modal-actions">
           <button type="button" data-close>Отмена</button>
@@ -203,6 +221,6 @@
     </dialog>
 
     <div id="toast" class="toast" hidden></div>
-    <script src="/app.js?v=8"></script>
+    <script src="/app.js?v=9"></script>
   </body>
 </html>

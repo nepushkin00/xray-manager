@@ -223,7 +223,10 @@ function updateSelectionUi(rows = visibleProfiles()) {
   }
   $("#selectionHint").textContent = totalSelected ? `Выбрано: ${totalSelected}` : "";
   $("#deleteSelectedBtn").disabled = totalSelected === 0;
+  $("#excludeAutoSelectedBtn").disabled = totalSelected === 0;
+  $("#includeAutoSelectedBtn").disabled = totalSelected === 0;
   $("#clearSelectionBtn").disabled = totalSelected === 0;
+  $("#activateBestBtn").disabled = state.bulkTesting || state.profiles.every((profile) => profile.delayMs == null || profile.lastTestError || profile.autoSwitchExcluded);
   $("#testAllBtn").disabled = state.bulkTesting || state.profiles.length === 0;
   $("#testAllBtn").textContent = state.bulkTesting ? "Проверка..." : "Проверить все";
   $("#bulkHint").textContent = state.bulkProgress;
@@ -236,6 +239,9 @@ function renderProfiles() {
   $("#profilesBody").innerHTML = rows.map((profile, index) => {
     const active = profile.id === state.activeProfileId;
     const checked = state.selectedIds.has(profile.id) ? "checked" : "";
+    const autoSwitch = profile.autoSwitchExcluded
+      ? '<span class="auto-badge is-off">нет</span>'
+      : '<span class="auto-badge">да</span>';
     return `
       <tr class="${active ? "is-active" : ""}">
         <td class="col-check"><input class="profile-check" type="checkbox" data-id="${profile.id}" ${checked}></td>
@@ -248,9 +254,11 @@ function renderProfiles() {
         <td>${escapeHtml(profile.security || "none")}</td>
         <td>${escapeHtml(profile.group || "")}</td>
         <td>${profileDelay(profile)}</td>
+        <td>${autoSwitch}</td>
         <td class="actions">
           <button data-action="activate" data-id="${profile.id}" title="Сделать активным">✓</button>
           <button data-action="test" data-id="${profile.id}" title="Проверить задержку">↯</button>
+          <button data-action="toggle-auto" data-id="${profile.id}" title="${profile.autoSwitchExcluded ? "Вернуть в автовыбор" : "Исключить из автовыбора"}">A</button>
           <button data-action="edit" data-id="${profile.id}" title="Редактировать">✎</button>
           <button data-action="delete" data-id="${profile.id}" class="danger" title="Удалить">×</button>
         </td>
@@ -316,6 +324,18 @@ function fillSettingsForm() {
   form.loglevel.value = settings.loglevel || "warning";
   form.muxEnabled.checked = Boolean(settings.mux?.enabled);
   form.muxConcurrency.value = settings.mux?.concurrency ?? -1;
+  form.autoSwitchEnabled.checked = Boolean(settings.autoSwitch?.enabled);
+  form.autoSwitchIntervalMinutes.value = settings.autoSwitch?.intervalMinutes ?? 0;
+  form.autoSwitchRefreshSubscriptions.checked = settings.autoSwitch?.refreshSubscriptions !== false;
+  form.autoSwitchTestProfiles.checked = settings.autoSwitch?.testProfiles !== false;
+  form.autoSwitchFailoverEnabled.checked = settings.autoSwitch?.failoverEnabled !== false;
+  form.autoSwitchFailoverIntervalSeconds.value = settings.autoSwitch?.failoverIntervalSeconds ?? 60;
+  form.autoSwitchFailoverFailures.value = settings.autoSwitch?.failoverFailures ?? 2;
+  form.autoSwitchMaxDelayMs.value = settings.autoSwitch?.maxDelayMs ?? 0;
+  const autoStatus = settings.autoSwitch?.lastRunStatus || "не запускался";
+  const autoTime = settings.autoSwitch?.lastRunAt ? ` · ${new Date(settings.autoSwitch.lastRunAt).toLocaleString()}` : "";
+  const failoverStatus = settings.autoSwitch?.lastFailoverStatus ? ` · failover: ${settings.autoSwitch.lastFailoverStatus}` : "";
+  $("#autoSwitchStatus").textContent = `${autoStatus}${autoTime}${settings.autoSwitch?.lastRunError ? ` · ${settings.autoSwitch.lastRunError}` : ""}${failoverStatus}`;
   state.settings.routingDirectDomains = Array.isArray(settings.routingDirectDomains) ? settings.routingDirectDomains : [];
   renderDirectDomains();
 }
@@ -355,6 +375,7 @@ function openEdit(profile) {
   for (const key of ["id", "name", "group", "address", "port", "uuid", "flow", "network", "security", "serverName", "fingerprint", "publicKey", "shortId"]) {
     form[key].value = profile[key] ?? "";
   }
+  form.autoSwitchExcluded.checked = Boolean(profile.autoSwitchExcluded);
   $("#editDialog").showModal();
 }
 
@@ -368,6 +389,16 @@ function settingsPayloadFromForm() {
     mux: {
       enabled: form.muxEnabled.checked,
       concurrency: Number(form.muxConcurrency.value)
+    },
+    autoSwitch: {
+      enabled: form.autoSwitchEnabled.checked,
+      intervalMinutes: Number(form.autoSwitchIntervalMinutes.value),
+      refreshSubscriptions: form.autoSwitchRefreshSubscriptions.checked,
+      testProfiles: form.autoSwitchTestProfiles.checked,
+      failoverEnabled: form.autoSwitchFailoverEnabled.checked,
+      failoverIntervalSeconds: Number(form.autoSwitchFailoverIntervalSeconds.value),
+      failoverFailures: Number(form.autoSwitchFailoverFailures.value),
+      maxDelayMs: Number(form.autoSwitchMaxDelayMs.value)
     },
     mixed: {
       listen: form.listen.value,
@@ -387,6 +418,15 @@ async function saveSettingsAndApply(message = "Настройки примене
   await api("/api/apply", { method: "POST" });
   toast(message);
   await loadAll();
+}
+
+async function setSelectedAutoSwitchExcluded(excluded) {
+  const ids = [...state.selectedIds];
+  if (!ids.length) return;
+  const result = await api("/api/profiles/bulk-auto-switch", { method: "POST", body: { ids, excluded } });
+  state.profiles = Array.isArray(result.profiles) ? result.profiles : state.profiles;
+  toast(excluded ? `Исключено из авто: ${result.updated}` : `Возвращено в авто: ${result.updated}`);
+  renderProfiles();
 }
 
 async function main() {
@@ -434,6 +474,44 @@ async function main() {
       await loadAll().catch(() => {});
     }
   });
+  $("#excludeAutoSelectedBtn").addEventListener("click", () => {
+    setSelectedAutoSwitchExcluded(true).catch((error) => toast(error.message));
+  });
+  $("#includeAutoSelectedBtn").addEventListener("click", () => {
+    setSelectedAutoSwitchExcluded(false).catch((error) => toast(error.message));
+  });
+  $("#activateBestBtn").addEventListener("click", async () => {
+    try {
+      const result = await api("/api/auto-switch/activate-fastest", { method: "POST" });
+      state.activeProfileId = result.activeProfileId;
+      state.activeProfileKey = result.activeProfileKey || null;
+      state.profiles = Array.isArray(result.profiles) ? result.profiles : state.profiles;
+      toast(`Активен лучший: ${result.selectedProfile.name || result.selectedProfile.address}`);
+      renderProfiles();
+    } catch (error) {
+      toast(error.message);
+      await loadAll().catch(() => {});
+    }
+  });
+  $("#runAutoSwitchBtn").addEventListener("click", async () => {
+    try {
+      $("#runAutoSwitchBtn").disabled = true;
+      const result = await api("/api/auto-switch/run", { method: "POST" });
+      if (result.profiles) state.profiles = result.profiles;
+      if (result.selectedProfile) {
+        state.activeProfileId = result.selectedProfile.id;
+        state.activeProfileKey = result.selectedProfile.key || state.activeProfileKey;
+      }
+      if (result.skipped) toast("Автовыбор уже занят");
+      else toast(result.selectedProfile ? `Активен лучший: ${result.selectedProfile.name || result.selectedProfile.address}` : "Автовыбор завершён");
+      await loadAll();
+    } catch (error) {
+      toast(error.message);
+      await loadAll().catch(() => {});
+    } finally {
+      $("#runAutoSwitchBtn").disabled = false;
+    }
+  });
   $("#testAllBtn").addEventListener("click", async () => {
     if (!state.profiles.length || state.bulkTesting) return;
     if (!confirm(`Проверить задержку у всех профилей: ${state.profiles.length}?`)) return;
@@ -445,8 +523,11 @@ async function main() {
     try {
       const result = await api("/api/test-all", { method: "POST", body: { ids: profiles.map((profile) => profile.id) } });
       state.profiles = Array.isArray(result.profiles) ? result.profiles : state.profiles;
+      state.activeProfileId = result.activeProfileId || state.activeProfileId;
+      state.activeProfileKey = result.activeProfileKey || state.activeProfileKey;
       state.bulkProgress = "";
-      toast(`Проверка завершена: ${result.success} ok, ${result.failed} ошибок · потоков: ${result.concurrency}`);
+      const selected = result.selectedProfile ? ` · активен: ${result.selectedProfile.name || result.selectedProfile.address}` : "";
+      toast(`Проверка завершена: ${result.success} ok, ${result.failed} ошибок · потоков: ${result.concurrency}${selected}`);
     } catch (error) {
       if (error.status === 409) toast("Проверка задержек уже запущена");
       else toast(error.message);
@@ -533,6 +614,14 @@ async function main() {
           renderProfiles();
         }
       }
+      if (button.dataset.action === "toggle-auto") {
+        const result = await api(`/api/profiles/${profile.id}`, {
+          method: "PATCH",
+          body: { autoSwitchExcluded: !Boolean(profile.autoSwitchExcluded) }
+        });
+        updateProfile(result.profile);
+        renderProfiles();
+      }
       if (button.dataset.action === "edit") openEdit(profile);
       if (button.dataset.action === "delete") {
         if (!confirm(`Удалить ${profile.name}?`)) return;
@@ -562,6 +651,7 @@ async function main() {
     const id = body.id;
     delete body.id;
     body.port = Number(body.port);
+    body.autoSwitchExcluded = form.autoSwitchExcluded.checked;
     try {
       await api(`/api/profiles/${id}`, { method: "PATCH", body });
       $("#editDialog").close();

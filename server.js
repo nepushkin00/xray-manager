@@ -37,6 +37,7 @@ const DEFAULT_LATENCY_TEST_CONCURRENCY = clampNumber(process.env.LATENCY_TEST_CO
 let managedXrayProcess = null;
 let managedXrayStopping = false;
 let bulkLatencyTestRunning = false;
+let autoSwitchTaskRunning = false;
 
 const JSON_TYPE = { "content-type": "application/json; charset=utf-8" };
 const TEXT_TYPE = { "content-type": "text/plain; charset=utf-8" };
@@ -183,7 +184,8 @@ function parseVlessLink(link, defaults = {}) {
     updatedAt: nowIso(),
     delayMs: null,
     lastTestAt: null,
-    lastTestError: null
+    lastTestError: null,
+    autoSwitchExcluded: false
   };
 
   profile.key = profileKey(profile);
@@ -314,6 +316,24 @@ function defaultState() {
       speedTest: {
         url: "https://www.gstatic.com/generate_204",
         timeoutSeconds: 15
+      },
+      autoSwitch: {
+        enabled: false,
+        intervalMinutes: 60,
+        refreshSubscriptions: true,
+        testProfiles: true,
+        failoverEnabled: true,
+        failoverIntervalSeconds: 60,
+        failoverFailures: 2,
+        failoverConsecutiveFailures: 0,
+        maxDelayMs: 0,
+        lastRunAt: null,
+        lastRunStatus: null,
+        lastRunError: null,
+        lastFailoverAt: null,
+        lastFailoverStatus: null,
+        lastFailoverError: null,
+        lastSelectedProfileId: null
       },
       security: {
         clientAllowCidrs: [],
@@ -481,7 +501,8 @@ function importProfilesFromXrayConfig(config) {
       updatedAt: nowIso(),
       delayMs: null,
       lastTestAt: null,
-      lastTestError: null
+      lastTestError: null,
+      autoSwitchExcluded: false
     };
     profile.rawLink = profileToLink(profile);
     profile.key = profileKey(profile);
@@ -521,6 +542,7 @@ function mergeState(base, override) {
     mixed: { ...base.settings.mixed, ...(override.settings?.mixed || {}) },
     mux: { ...base.settings.mux, ...(override.settings?.mux || {}) },
     speedTest: { ...base.settings.speedTest, ...(override.settings?.speedTest || {}) },
+    autoSwitch: { ...base.settings.autoSwitch, ...(override.settings?.autoSwitch || {}) },
     security: { ...base.settings.security, ...(override.settings?.security || {}) }
   };
   merged.profiles = Array.isArray(override.profiles) ? override.profiles : [];
@@ -564,6 +586,25 @@ function setActiveProfile(state, profile) {
   profile.key = profileKey(profile);
   state.activeProfileId = profile.id;
   state.activeProfileKey = profile.key;
+  return profile;
+}
+
+function fastestProfile(state) {
+  const maxDelayMs = Number(state.settings?.autoSwitch?.maxDelayMs || 0);
+  const candidates = state.profiles
+    .filter((profile) => !profile.autoSwitchExcluded)
+    .filter((profile) => Number.isFinite(Number(profile.delayMs)) && Number(profile.delayMs) >= 0 && !profile.lastTestError)
+    .filter((profile) => maxDelayMs <= 0 || Number(profile.delayMs) <= maxDelayMs)
+    .sort((left, right) => Number(left.delayMs) - Number(right.delayMs));
+  return candidates[0] || null;
+}
+
+async function activateFastestProfile(state, apply = true) {
+  const profile = fastestProfile(state);
+  if (!profile) return null;
+  setActiveProfile(state, profile);
+  await saveState(state);
+  if (apply) await writeAndApplyXrayConfig(state, true);
   return profile;
 }
 
@@ -1245,7 +1286,8 @@ function mergeProfiles(existingProfiles, incomingProfiles, options = {}) {
         updatedAt: nowIso(),
         delayMs: existing.delayMs ?? null,
         lastTestAt: existing.lastTestAt ?? null,
-        lastTestError: existing.lastTestError ?? null
+        lastTestError: existing.lastTestError ?? null,
+        autoSwitchExcluded: Boolean(existing.autoSwitchExcluded)
       });
       updated += 1;
     } else {
@@ -1284,6 +1326,161 @@ async function refreshSubscription(state, subscriptionId) {
   return { ...merged, totalLinks: links.length };
 }
 
+async function refreshAllSubscriptions(state) {
+  const results = [];
+  for (const sub of [...state.subscriptions]) {
+    try {
+      const result = await refreshSubscription(state, sub.id);
+      results.push({ id: sub.id, ok: true, ...result });
+    } catch (error) {
+      const current = state.subscriptions.find((item) => item.id === sub.id);
+      if (current) {
+        current.lastUpdateAt = nowIso();
+        current.lastUpdateStatus = "error";
+        current.lastUpdateError = error.message;
+        await saveState(state);
+      }
+      results.push({ id: sub.id, ok: false, error: error.message });
+    }
+  }
+  return results;
+}
+
+function autoSwitchIntervalMs(settings) {
+  if (!settings?.autoSwitch?.enabled) return 0;
+  const minutes = clampNumber(settings.autoSwitch.intervalMinutes || 0, 0, 1440);
+  return minutes > 0 ? minutes * 60 * 1000 : 0;
+}
+
+function failoverIntervalMs(settings) {
+  if (!settings?.autoSwitch?.enabled || !settings.autoSwitch.failoverEnabled) return 0;
+  const seconds = clampNumber(settings.autoSwitch.failoverIntervalSeconds || 60, 10, 3600);
+  return seconds * 1000;
+}
+
+async function runAutoSwitchCycle(reason = "manual", options = {}) {
+  if (autoSwitchTaskRunning) return { ok: false, skipped: true, reason: "already-running" };
+  if (bulkLatencyTestRunning) {
+    const state = await loadState();
+    state.settings.autoSwitch.lastRunAt = nowIso();
+    state.settings.autoSwitch.lastRunStatus = "skipped: latency check running";
+    state.settings.autoSwitch.lastRunError = null;
+    await saveState(state);
+    return { ok: false, skipped: true, reason: "latency-running" };
+  }
+
+  autoSwitchTaskRunning = true;
+  let state = await loadState();
+  try {
+    const settings = state.settings.autoSwitch || {};
+    if (!settings.enabled && reason !== "manual") return { ok: false, skipped: true, reason: "disabled" };
+    const refreshSubscriptions = options.refreshSubscriptions ?? settings.refreshSubscriptions;
+    const testProfiles = options.testProfiles ?? settings.testProfiles;
+
+    state.settings.autoSwitch.lastRunAt = nowIso();
+    state.settings.autoSwitch.lastRunStatus = "running";
+    state.settings.autoSwitch.lastRunError = null;
+    await saveState(state);
+
+    let subscriptionResults = [];
+    if (refreshSubscriptions) {
+      subscriptionResults = await refreshAllSubscriptions(state);
+    }
+
+    let latencyResults = [];
+    if (testProfiles) {
+      bulkLatencyTestRunning = true;
+      try {
+        latencyResults = await testProfilesConcurrently(state, state.profiles, DEFAULT_LATENCY_TEST_CONCURRENCY);
+      } finally {
+        bulkLatencyTestRunning = false;
+      }
+    }
+
+    const selected = await activateFastestProfile(state, true);
+    const failedSubs = subscriptionResults.filter((item) => !item.ok).length;
+    state.settings.autoSwitch.lastRunAt = nowIso();
+    state.settings.autoSwitch.lastRunStatus = selected
+      ? `ok: ${selected.name || selected.address} (${selected.delayMs} ms)`
+      : "ok: no candidate";
+    state.settings.autoSwitch.lastRunError = failedSubs ? `subscription errors: ${failedSubs}` : null;
+    state.settings.autoSwitch.lastSelectedProfileId = selected?.id || null;
+    await saveState(state);
+
+    return {
+      ok: true,
+      selectedProfile: selected,
+      subscriptions: subscriptionResults,
+      latency: {
+        total: latencyResults.length,
+        success: latencyResults.filter((item) => !item.error).length,
+        failed: latencyResults.filter((item) => item.error).length
+      },
+      profiles: state.profiles
+    };
+  } catch (error) {
+    state.settings.autoSwitch.lastRunAt = nowIso();
+    state.settings.autoSwitch.lastRunStatus = "error";
+    state.settings.autoSwitch.lastRunError = error.message;
+    await saveState(state).catch(() => {});
+    throw error;
+  } finally {
+    autoSwitchTaskRunning = false;
+  }
+}
+
+async function runFailoverCheck() {
+  if (autoSwitchTaskRunning || bulkLatencyTestRunning) return { ok: false, skipped: true, reason: "busy" };
+  autoSwitchTaskRunning = true;
+  let state = await loadState();
+  try {
+    const settings = state.settings.autoSwitch || {};
+    if (!settings.enabled || !settings.failoverEnabled) return { ok: false, skipped: true, reason: "disabled" };
+
+    const active = normalizeActiveProfile(state);
+    if (!active) return { ok: false, skipped: true, reason: "no-active-profile" };
+
+    const result = await runDelayTest(state, active);
+    applyLatencyResult(active, result);
+
+    if (!result.error) {
+      state.settings.autoSwitch.failoverConsecutiveFailures = 0;
+      state.settings.autoSwitch.lastFailoverAt = nowIso();
+      state.settings.autoSwitch.lastFailoverStatus = `active ok: ${active.name || active.address} (${result.delayMs} ms)`;
+      state.settings.autoSwitch.lastFailoverError = null;
+      await saveState(state);
+      return { ok: true, failed: false, activeProfile: active };
+    }
+
+    const failures = Number(state.settings.autoSwitch.failoverConsecutiveFailures || 0) + 1;
+    state.settings.autoSwitch.failoverConsecutiveFailures = failures;
+    state.settings.autoSwitch.lastFailoverAt = nowIso();
+    state.settings.autoSwitch.lastFailoverStatus = `active failed: ${failures}/${settings.failoverFailures || 2}`;
+    state.settings.autoSwitch.lastFailoverError = result.error;
+    await saveState(state);
+
+    if (failures < clampNumber(settings.failoverFailures || 2, 1, 10)) {
+      return { ok: false, failed: true, switched: false, activeProfile: active };
+    }
+  } finally {
+    autoSwitchTaskRunning = false;
+  }
+
+  const switchResult = await runAutoSwitchCycle("failover", {
+    refreshSubscriptions: false,
+    testProfiles: true
+  });
+  state = await loadState();
+  state.settings.autoSwitch.failoverConsecutiveFailures = switchResult.selectedProfile ? 0 : Number(state.settings.autoSwitch.failoverConsecutiveFailures || 0);
+  state.settings.autoSwitch.lastFailoverAt = nowIso();
+  state.settings.autoSwitch.lastFailoverStatus = switchResult.selectedProfile
+    ? `switched: ${switchResult.selectedProfile.name || switchResult.selectedProfile.address}`
+    : "switch failed: no candidate";
+  state.settings.autoSwitch.lastFailoverError = switchResult.selectedProfile ? null : "No eligible working profile.";
+  await saveState(state);
+  return { ...switchResult, failed: true, switched: Boolean(switchResult.selectedProfile) };
+}
+
 function sanitizeSettingsPatch(current, patch, secrets) {
   const next = mergeState(defaultState(), { settings: current }).settings;
   if (patch.loglevel) next.loglevel = String(patch.loglevel);
@@ -1297,6 +1494,17 @@ function sanitizeSettingsPatch(current, patch, secrets) {
   if (patch.speedTest && typeof patch.speedTest === "object") {
     if (patch.speedTest.url) next.speedTest.url = String(patch.speedTest.url);
     if (patch.speedTest.timeoutSeconds) next.speedTest.timeoutSeconds = Math.max(5, Math.min(60, Number(patch.speedTest.timeoutSeconds)));
+  }
+  if (patch.autoSwitch && typeof patch.autoSwitch === "object") {
+    const autoSwitch = patch.autoSwitch;
+    if (autoSwitch.enabled !== undefined) next.autoSwitch.enabled = Boolean(autoSwitch.enabled);
+    if (autoSwitch.intervalMinutes !== undefined) next.autoSwitch.intervalMinutes = clampNumber(autoSwitch.intervalMinutes, 0, 1440);
+    if (autoSwitch.refreshSubscriptions !== undefined) next.autoSwitch.refreshSubscriptions = Boolean(autoSwitch.refreshSubscriptions);
+    if (autoSwitch.testProfiles !== undefined) next.autoSwitch.testProfiles = Boolean(autoSwitch.testProfiles);
+    if (autoSwitch.failoverEnabled !== undefined) next.autoSwitch.failoverEnabled = Boolean(autoSwitch.failoverEnabled);
+    if (autoSwitch.failoverIntervalSeconds !== undefined) next.autoSwitch.failoverIntervalSeconds = clampNumber(autoSwitch.failoverIntervalSeconds, 10, 3600);
+    if (autoSwitch.failoverFailures !== undefined) next.autoSwitch.failoverFailures = clampNumber(autoSwitch.failoverFailures, 1, 10);
+    if (autoSwitch.maxDelayMs !== undefined) next.autoSwitch.maxDelayMs = Math.max(0, Number(autoSwitch.maxDelayMs) || 0);
   }
   if (patch.mixed && typeof patch.mixed === "object") {
     const mixed = patch.mixed;
@@ -1435,6 +1643,26 @@ function makeApp(secrets) {
       return;
     }
 
+    if (pathname === "/api/profiles/bulk-auto-switch" && req.method === "POST") {
+      const body = await readRequestBody(req);
+      const ids = new Set(Array.isArray(body.ids) ? body.ids.map(String) : []);
+      if (!ids.size) {
+        sendJson(res, 400, { error: "No profiles selected." });
+        return;
+      }
+      const excluded = Boolean(body.excluded);
+      let updated = 0;
+      for (const profile of state.profiles) {
+        if (!ids.has(profile.id)) continue;
+        profile.autoSwitchExcluded = excluded;
+        profile.updatedAt = nowIso();
+        updated += 1;
+      }
+      await saveState(state);
+      sendJson(res, 200, { ok: true, updated, profiles: state.profiles });
+      return;
+    }
+
     if (pathname === "/api/import" && req.method === "POST") {
       const body = await readRequestBody(req);
       const links = extractLinks(body.text || body.links || "");
@@ -1463,9 +1691,12 @@ function makeApp(secrets) {
 
       if (parts.length === 3 && req.method === "PATCH") {
         const body = await readRequestBody(req);
-        const allowed = ["name", "group", "address", "port", "uuid", "encryption", "flow", "network", "security", "serverName", "fingerprint", "publicKey", "shortId", "spiderX", "alpn", "allowInsecure", "host", "path", "serviceName", "mode"];
+        const allowed = ["name", "group", "address", "port", "uuid", "encryption", "flow", "network", "security", "serverName", "fingerprint", "publicKey", "shortId", "spiderX", "alpn", "allowInsecure", "host", "path", "serviceName", "mode", "autoSwitchExcluded"];
         for (const key of allowed) {
-          if (body[key] !== undefined) profile[key] = key === "port" ? toIntPort(body[key], profile.port) : body[key];
+          if (body[key] === undefined) continue;
+          if (key === "port") profile[key] = toIntPort(body[key], profile.port);
+          else if (key === "autoSwitchExcluded") profile[key] = Boolean(body[key]);
+          else profile[key] = body[key];
         }
         profile.updatedAt = nowIso();
         profile.key = profileKey(profile);
@@ -1493,7 +1724,7 @@ function makeApp(secrets) {
     }
 
     if (pathname === "/api/test-all" && req.method === "POST") {
-      if (bulkLatencyTestRunning) {
+      if (bulkLatencyTestRunning || autoSwitchTaskRunning) {
         sendJson(res, 409, { error: "Latency check is already running." });
         return;
       }
@@ -1509,6 +1740,9 @@ function makeApp(secrets) {
       const results = await testProfilesConcurrently(state, profiles, concurrency).finally(() => {
         bulkLatencyTestRunning = false;
       });
+      const selectedProfile = state.settings.autoSwitch?.enabled && body.autoSwitch !== false
+        ? await activateFastestProfile(state, true)
+        : null;
       sendJson(res, 200, {
         ok: true,
         total: results.length,
@@ -1516,8 +1750,33 @@ function makeApp(secrets) {
         failed: results.filter((item) => item.error).length,
         concurrency,
         results,
+        selectedProfile,
+        activeProfileId: state.activeProfileId,
+        activeProfileKey: state.activeProfileKey,
         profiles: state.profiles
       });
+      return;
+    }
+
+    if (pathname === "/api/auto-switch/activate-fastest" && req.method === "POST") {
+      const selectedProfile = await activateFastestProfile(state, true);
+      if (!selectedProfile) {
+        sendJson(res, 404, { error: "No eligible profile with successful latency." });
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        selectedProfile,
+        activeProfileId: state.activeProfileId,
+        activeProfileKey: state.activeProfileKey,
+        profiles: state.profiles
+      });
+      return;
+    }
+
+    if (pathname === "/api/auto-switch/run" && req.method === "POST") {
+      const result = await runAutoSwitchCycle("manual");
+      sendJson(res, 200, result);
       return;
     }
 
@@ -1708,6 +1967,57 @@ function installShutdownHandlers() {
   process.once("SIGINT", () => shutdown("SIGINT"));
 }
 
+function startAutoSwitchScheduler() {
+  const fallbackDelayMs = 60 * 1000;
+  const scheduleAutoSwitch = (delayMs) => {
+    const timer = setTimeout(async () => {
+      let nextDelayMs = fallbackDelayMs;
+      try {
+        const state = await loadState();
+        const intervalMs = autoSwitchIntervalMs(state.settings);
+        if (intervalMs > 0) {
+          await runAutoSwitchCycle("schedule");
+          nextDelayMs = intervalMs;
+        }
+      } catch (error) {
+        console.error(`auto switch scheduler failed: ${error.message}`);
+      } finally {
+        scheduleAutoSwitch(nextDelayMs);
+      }
+    }, delayMs);
+    timer.unref();
+  };
+
+  const scheduleFailover = (delayMs) => {
+    const timer = setTimeout(async () => {
+      let nextDelayMs = fallbackDelayMs;
+      try {
+        const state = await loadState();
+        const intervalMs = failoverIntervalMs(state.settings);
+        if (intervalMs > 0) {
+          nextDelayMs = intervalMs;
+          await runFailoverCheck();
+        }
+      } catch (error) {
+        console.error(`failover watchdog failed: ${error.message}`);
+      } finally {
+        scheduleFailover(nextDelayMs);
+      }
+    }, delayMs);
+    timer.unref();
+  };
+
+  loadState()
+    .then((state) => {
+      scheduleAutoSwitch(autoSwitchIntervalMs(state.settings) > 0 ? 15000 : fallbackDelayMs);
+      scheduleFailover(failoverIntervalMs(state.settings) > 0 ? 15000 : fallbackDelayMs);
+    })
+    .catch(() => {
+      scheduleAutoSwitch(fallbackDelayMs);
+      scheduleFailover(fallbackDelayMs);
+    });
+}
+
 async function start() {
   await ensureLayout();
   const secrets = await ensureSecrets();
@@ -1722,6 +2032,7 @@ async function start() {
     await startManagedXray(state);
     installShutdownHandlers();
   }
+  startAutoSwitchScheduler();
   const tls = getTlsFiles();
   const app = makeApp(secrets);
   const tlsOptions = {
